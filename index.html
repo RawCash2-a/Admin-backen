@@ -1,0 +1,48 @@
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+admin.initializeApp();
+const db = admin.firestore();
+const auth = admin.auth();
+
+// Middleware for admin token validation
+const withAdminAuth = fn => async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split('Bearer ')[1];
+    if (!token) throw new Error('Missing token');
+    const decoded = await auth.verifyIdToken(token);
+    if (!decoded.admin) throw new Error('Not an admin');
+    return fn(req, res, decoded.uid);
+  } catch (e) {
+    res.status(403).send({ error: e.message });
+  }
+};
+
+// GET /functions/users
+exports.api = functions.https.onRequest((req, res) => {
+  if (req.path === '/users') return withAdminAuth(async (req, res) => {
+    const users = await db.collection('users').get();
+    const result = users.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.send(result);
+  })(req, res);
+
+  if (req.path === '/withdrawals/pending') return withAdminAuth(async (req, res) => {
+    const txs = await db.collection('transactions')
+      .where('description', '==', 'Withdrawal')
+      .where('status', '==', 'Pending')
+      .orderBy('timestamp', 'desc').get();
+    res.send(txs.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+  })(req, res);
+
+  if (req.path.startsWith('/withdrawals/') && req.method === 'POST') {
+    return withAdminAuth(async (req, res) => {
+      const id = req.path.split('/').pop();
+      const { approve } = req.body;
+      if (typeof approve !== 'boolean') return res.status(400).send({ error: 'approve must be boolean' });
+      await db.collection('transactions').doc(id)
+        .update({ status: approve ? 'Completed' : 'Rejected' });
+      res.send({ success: true });
+    })(req, res);
+  }
+
+  res.status(404).send({ error: 'Route not found' });
+});
